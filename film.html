@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Opus 5.5 Demo Film</title>
+<!--
+  One file. No libraries. No assets.
+  Everything on screen is computed: particles, attractor, fractal, type.
+  Open in a browser to watch it live, or drive window.renderFrame(i) to render frames offline.
+-->
+<style>
+  :root { --fg: #f4efe6; --dim: #8b857b; --accent: #e8875b; }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  #stage { position: relative; width: 1920px; height: 1080px; transform-origin: 0 0; background: #000; }
+  canvas { position: absolute; inset: 0; width: 1920px; height: 1080px; }
+  .layer { position: absolute; inset: 0; pointer-events: none; opacity: 0; }
+  #term { display: flex; align-items: center; justify-content: center; }
+  #term pre {
+    font: 500 44px/1.45 "DejaVu Sans Mono", monospace; color: var(--fg); margin: 0; white-space: pre-wrap;
+    width: 1500px;
+  }
+  #term .p { color: var(--accent); }
+  #term .c { display: inline-block; width: 0.6em; height: 1.05em; background: var(--fg); vertical-align: -0.18em; }
+  .cap {
+    position: absolute; left: 96px; bottom: 84px; font: 400 30px/1.3 "DejaVu Sans Mono", monospace;
+    color: var(--fg); letter-spacing: 0.02em; text-shadow: 0 0 18px #000, 0 0 4px #000;
+  }
+  .cap b { color: var(--accent); font-weight: 500; }
+  .cap small { display: block; color: var(--dim); font-size: 24px; margin-top: 8px; }
+  #end { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+  #end h1 { font: 700 104px/1.05 "DejaVu Sans", sans-serif; color: var(--fg); margin: 0 0 40px; letter-spacing: -0.02em; }
+  #end .row { font: 400 38px/1.7 "DejaVu Sans Mono", monospace; color: var(--fg); opacity: 0; }
+  #end .row b { color: var(--accent); font-weight: 500; }
+  #end .sig { margin-top: 44px; font: 400 30px/1.4 "DejaVu Sans Mono", monospace; color: var(--dim); opacity: 0; }
+  #hud { position: absolute; right: 96px; top: 72px; font: 400 24px/1.4 "DejaVu Sans Mono", monospace; color: var(--dim); text-align: right; opacity: 0; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="gl" width="1920" height="1080"></canvas>
+  <div id="term" class="layer"><pre id="termtext"></pre></div>
+  <div id="cap1" class="layer"><div class="cap"><b>262,144</b> particles, each one simulated on the GPU<small>curl-noise flow &rarr; spring to glyph targets</small></div></div>
+  <div id="cap2" class="layer"><div class="cap">Aizawa strange attractor<small>dx/dt = (z&minus;&beta;)x &minus; &delta;y &nbsp;&middot;&nbsp; 6 coupled ODEs per particle per frame</small></div></div>
+  <div id="cap3" class="layer"><div class="cap">Mandelbulb, power 8<small>raymarched per pixel &middot; distance estimator &middot; orbit-trap colour</small></div></div>
+  <div id="hud" class="layer"></div>
+  <div id="end" class="layer">
+    <h1>All of this is one HTML file.</h1>
+    <div class="row" id="r1"><b>0</b> libraries &nbsp;&middot;&nbsp; <b>0</b> assets &nbsp;&middot;&nbsp; <b>0</b> edits by a human</div>
+    <div class="row" id="r2">Music synthesized from code, sample by sample</div>
+    <div class="row" id="r3">Picked, written, rendered &amp; scored in one session</div>
+    <div class="sig" id="sig">&mdash; Claude Opus 5.5</div>
+  </div>
+</div>
+<script>
+"use strict";
+// ---------- timeline (seconds) ----------
+const FPS = 30;
+const T = {
+  termEnd: 4.0,       // prompt typing
+  textIn: 4.0,        // particles converge to "OPUS 5.5"
+  toAttr: 10.5,       // text releases into attractor
+  toBulb: 17.0,       // attractor gives way to the fractal
+  endIn: 25.0,        // end card
+  total: 32.0,
+};
+const DURATION = T.total;
+
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const smooth = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+const win = (t, a, b, f) => smooth(a, a + f, t) * (1 - smooth(b - f, b, t));
+
+// ---------- GL setup ----------
+const canvas = document.getElementById('gl');
+const gl = canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true, alpha: false });
+if (!gl) throw new Error('WebGL2 required');
+gl.getExtension('EXT_color_buffer_float');
+gl.getExtension('OES_texture_float_linear');
+const W = 1920, H = 1080;
+
+function sh(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, '#version 300 es\nprecision highp float;\nprecision highp int;\n' + src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s) + '\n' + src);
+  return s;
+}
+function prog(vs, fs) {
+  const p = gl.createProgram();
+  gl.attachShader(p, sh(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, sh(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const u = {};
+  const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) { const a = gl.getActiveUniform(p, i); u[a.name] = gl.getUniformLocation(p, a.name); }
+  return { p, u };
+}
+function tex(w, h, fmt, data, filter) {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  const f = filter || gl.NEAREST;
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, f);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, f);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const [ifmt, type] = fmt === 'f32' ? [gl.RGBA32F, gl.FLOAT] : fmt === 'f16' ? [gl.RGBA16F, gl.HALF_FLOAT] : [gl.RGBA8, gl.UNSIGNED_BYTE];
+  gl.texImage2D(gl.TEXTURE_2D, 0, ifmt, w, h, 0, gl.RGBA, type, data || null);
+  return t;
+}
+function fbo(textures) {
+  const f = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+  textures.forEach((t, i) => gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i, gl.TEXTURE_2D, t, 0));
+  gl.drawBuffers(textures.map((_, i) => gl.COLOR_ATTACHMENT0 + i));
+  return f;
+}
+const quadVS = `out vec2 uv; void main(){ vec2 p = vec2((gl_VertexID<<1)&2, gl_VertexID&2); uv = p; gl_Position = vec4(p*2.0-1.0,0,1); }`;
+const vao = gl.createVertexArray();
+function quad() { gl.bindVertexArray(vao); gl.drawArrays(gl.TRIANGLES, 0, 3); }
+
+// ---------- deterministic RNG ----------
+let seed = 1337;
+const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+
+// ---------- particles ----------
+const PS = 512, N = PS * PS;
+
+// glyph targets: rasterize text, sample lit pixels
+function glyphTargets() {
+  const c = document.createElement('canvas'); c.width = 1600; c.height = 420;
+  const x = c.getContext('2d');
+  x.fillStyle = '#fff'; x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.font = '700 330px "DejaVu Sans", sans-serif';
+  x.fillText('OPUS 5.5', 800, 222);
+  const d = x.getImageData(0, 0, c.width, c.height).data;
+  const pts = [];
+  for (let y = 0; y < c.height; y += 1) for (let i = 0; i < c.width; i += 1) if (d[(y * c.width + i) * 4] > 128) pts.push(i, y);
+  const out = new Float32Array(N * 4);
+  const count = pts.length / 2;
+  for (let k = 0; k < N; k++) {
+    const j = Math.floor(rnd() * count);
+    const px = pts[2 * j] + rnd() - 0.5, py = pts[2 * j + 1] + rnd() - 0.5;
+    out[4 * k] = (px - 800) / 800 * 2.6;
+    out[4 * k + 1] = -(py - 210) / 800 * 2.6;
+    out[4 * k + 2] = (rnd() - 0.5) * 0.06;
+    out[4 * k + 3] = rnd();
+  }
+  return out;
+}
+
+const init = new Float32Array(N * 4);
+for (let k = 0; k < N; k++) {
+  // start as a wide, thin galaxy disk of dust
+  const r = Math.pow(rnd(), 0.5) * 5.0 + 0.3, a = rnd() * Math.PI * 2;
+  init[4 * k] = Math.cos(a) * r;
+  init[4 * k + 1] = (rnd() - 0.5) * 0.4;
+  init[4 * k + 2] = Math.sin(a) * r;
+  init[4 * k + 3] = rnd();
+}
+const posT = [tex(PS, PS, 'f32', init), tex(PS, PS, 'f32', init)];
+const velT = [tex(PS, PS, 'f32', new Float32Array(N * 4)), tex(PS, PS, 'f32', new Float32Array(N * 4))];
+const targetT = tex(PS, PS, 'f32', glyphTargets());
+
+// attractor seeds: one long Aizawa trajectory (RK4), sampled so every particle starts at a different phase
+function aizawaSeeds() {
+  const a = 0.95, b = 0.7, c = 0.6, d = 3.5, e = 0.25, f = 0.1;
+  const F = (x, y, z) => [(z - b) * x - d * y, d * x + (z - b) * y, c + a * z - z * z * z / 3 - (x * x + y * y) * (1 + e * z) + f * z * x * x * x];
+  let x = 0.1, y = 0, z = 0; const h = 0.004;
+  const step = () => {
+    const k1 = F(x, y, z), k2 = F(x + k1[0] * h / 2, y + k1[1] * h / 2, z + k1[2] * h / 2);
+    const k3 = F(x + k2[0] * h / 2, y + k2[1] * h / 2, z + k2[2] * h / 2), k4 = F(x + k3[0] * h, y + k3[1] * h, z + k3[2] * h);
+    x += h / 6 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]); y += h / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1]); z += h / 6 * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2]);
+  };
+  for (let i = 0; i < 20000; i++) step();
+  const out = new Float32Array(N * 4);
+  for (let k = 0; k < N; k++) {
+    for (let j = 0; j < 7; j++) step();
+    // attractor (x,y,z) -> world (x, z-0.7, y) * 1.25, same map the shader uses
+    out[4 * k] = x * 1.25; out[4 * k + 1] = (z - 0.7) * 1.25; out[4 * k + 2] = y * 1.25; out[4 * k + 3] = 1;
+  }
+  // shuffle so neighbours in the glyph are far apart on the attractor
+  for (let k = N - 1; k > 0; k--) { const j = Math.floor(rnd() * (k + 1)); for (let q = 0; q < 4; q++) { const t = out[4 * k + q]; out[4 * k + q] = out[4 * j + q]; out[4 * j + q] = t; } }
+  return out;
+}
+const aSeed = aizawaSeeds();
+const attT = [tex(PS, PS, 'f32', aSeed), tex(PS, PS, 'f32', aSeed)];
+const simF = [fbo([posT[0], velT[0], attT[0]]), fbo([posT[1], velT[1], attT[1]])];
+let ping = 0;
+
+const noiseGLSL = `
+vec3 hash3(vec3 p){ p = vec3(dot(p,vec3(127.1,311.7,74.7)), dot(p,vec3(269.5,183.3,246.1)), dot(p,vec3(113.5,271.9,124.6))); return fract(sin(p)*43758.5453)*2.0-1.0; }
+float gnoise(vec3 p){
+  vec3 i = floor(p), f = fract(p), u = f*f*(3.0-2.0*f);
+  return mix(mix(mix(dot(hash3(i),f), dot(hash3(i+vec3(1,0,0)),f-vec3(1,0,0)),u.x),
+                 mix(dot(hash3(i+vec3(0,1,0)),f-vec3(0,1,0)), dot(hash3(i+vec3(1,1,0)),f-vec3(1,1,0)),u.x),u.y),
+             mix(mix(dot(hash3(i+vec3(0,0,1)),f-vec3(0,0,1)), dot(hash3(i+vec3(1,0,1)),f-vec3(1,0,1)),u.x),
+                 mix(dot(hash3(i+vec3(0,1,1)),f-vec3(0,1,1)), dot(hash3(i+vec3(1,1,1)),f-vec3(1,1,1)),u.x),u.y),u.z);
+}
+vec3 pot(vec3 p){ return vec3(gnoise(p), gnoise(p+vec3(31.4,-12.7,8.1)), gnoise(p+vec3(-7.3,19.9,43.2))); }
+vec3 curl(vec3 p){
+  const float e = 0.08;
+  vec3 dx = vec3(e,0,0), dy = vec3(0,e,0), dz = vec3(0,0,e);
+  vec3 px0 = pot(p-dx), px1 = pot(p+dx), py0 = pot(p-dy), py1 = pot(p+dy), pz0 = pot(p-dz), pz1 = pot(p+dz);
+  return vec3(py1.z-py0.z - (pz1.y-pz0.y), pz1.x-pz0.x - (px1.z-px0.z), px1.y-px0.y - (py1.x-py0.x)) / (2.0*e);
+}`;
+
+const sim = prog(quadVS, noiseGLSL + `
+in vec2 uv;
+uniform sampler2D pos, vel, target, att;
+uniform float time, dt, wText, wAttr, wSwirl;
+layout(location=0) out vec4 oPos;
+layout(location=1) out vec4 oVel;
+layout(location=2) out vec4 oAtt;
+vec3 aizawa(vec3 p){
+  const float a=0.95, b=0.7, c=0.6, d=3.5, e=0.25, f=0.1;
+  float x=p.x, y=p.y, z=p.z;
+  return vec3((z-b)*x - d*y, d*x + (z-b)*y, c + a*z - z*z*z/3.0 - (x*x+y*y)*(1.0+e*z) + f*z*x*x*x);
+}
+void main(){
+  ivec2 ij = ivec2(gl_FragCoord.xy);
+  vec4 P = texelFetch(pos, ij, 0), V = texelFetch(vel, ij, 0), G = texelFetch(target, ij, 0);
+  vec3 p = P.xyz, v = V.xyz;
+  vec3 A = texelFetch(att, ij, 0).xyz;
+  float s = P.w;
+  // 1: swirl — galaxy rotation + curl noise
+  vec3 swirl = vec3(-p.z, 0.0, p.x) * 0.35 / (0.4 + length(p.xz)) + curl(p*0.45 + vec3(0, 0, time*0.15)) * 0.7;
+  // 2: glyph spring with a staggered arrival per particle
+  float arrive = clamp(wText * 1.8 - s * 0.8, 0.0, 1.0);
+  vec3 toT = G.xyz - p;
+  vec3 spring = toT * 9.0 * arrive - v * (2.2 + 4.0*arrive) + curl(p*2.2 + time*0.4) * 0.05 * arrive;
+  if (wAttr > 0.0) {
+    // each particle owns a point riding the attractor flow; release letters left to right, then fly to that point
+    vec3 qa = vec3(A.x, A.z, A.y + 0.7) / 1.25;
+    vec3 fA = aizawa(qa); fA = vec3(fA.x, fA.z, fA.y) * 1.25;
+    A += fA * dt * 0.9 * wAttr;
+    float rel = clamp(wAttr * 2.0 - (G.x * 0.18 + 0.47) - s*0.3, 0.0, 1.0);
+    float k = rel * rel;
+    vec3 acc = (A - p) * 30.0 * k - v * (3.0 + 8.0 * k) + curl(p*1.3 + time*0.3) * 1.2 * rel * (1.0 - k);
+    v += (spring * (1.0 - rel) + acc) * dt;
+    p += v * dt;
+    p = mix(p, A, smoothstep(0.85, 1.0, rel) * 0.25);
+    oPos = vec4(p, s); oVel = vec4(v, length(fA) * 0.5 * k + length(v) * (1.0 - k) * 0.4); oAtt = vec4(A, 1.0);
+    return;
+  } else {
+    v += (spring * wText + (swirl - v) * 1.4 * wSwirl * (1.0 - arrive)) * dt;
+  }
+  p += v * dt;
+  oPos = vec4(p, s);
+  oVel = vec4(v, length(v));
+  oAtt = vec4(A, 1.0);
+}`);
+
+function simStep(t, dt, wText, wAttr, wSwirl) {
+  const src = ping, dst = 1 - ping;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, simF[dst]);
+  gl.viewport(0, 0, PS, PS);
+  gl.disable(gl.BLEND);
+  gl.useProgram(sim.p);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, posT[src]);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, velT[src]);
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, targetT);
+  gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, attT[src]);
+  gl.uniform1i(sim.u.pos, 0); gl.uniform1i(sim.u.vel, 1); gl.uniform1i(sim.u.target, 2); gl.uniform1i(sim.u.att, 3);
+  gl.uniform1f(sim.u.time, t); gl.uniform1f(sim.u.dt, dt);
+  gl.uniform1f(sim.u.wText, wText); gl.uniform1f(sim.u.wAttr, wAttr); gl.uniform1f(sim.u.wSwirl, wSwirl);
+  quad();
+  ping = dst;
+}
+
+// particle render into HDR buffer
+const hdrW = W, hdrH = H;
+const hdrT = tex(hdrW, hdrH, 'f16', null, gl.LINEAR);
+const hdrF = fbo([hdrT]);
+
+const draw = prog(`
+uniform sampler2D pos, vel;
+uniform mat4 mvp;
+uniform float pscale, alpha, hueShift;
+out vec3 col;
+vec3 pal(float t){ return 0.5 + 0.5*cos(6.28318*(vec3(0.0,0.10,0.20) + t)); }
+void main(){
+  ivec2 ij = ivec2(gl_VertexID % ${PS}, gl_VertexID / ${PS});
+  vec4 P = texelFetch(pos, ij, 0);
+  float sp = texelFetch(vel, ij, 0).w;
+  gl_Position = mvp * vec4(P.xyz, 1.0);
+  gl_PointSize = pscale / gl_Position.w;
+  // warm core (clay/amber) shifting to cool blue with speed
+  vec3 warm = vec3(1.0, 0.55, 0.32), hot = vec3(1.0, 0.86, 0.66), cool = vec3(0.35, 0.55, 1.0);
+  vec3 c = mix(warm, hot, P.w);
+  c = mix(c, cool, clamp(sp*0.55 - 0.1, 0.0, 1.0) * hueShift);
+  col = c * alpha;
+}`, `
+in vec3 col; out vec4 o;
+void main(){ vec2 d = gl_PointCoord - 0.5; float r = dot(d,d); if (r > 0.25) discard; o = vec4(col * (1.0 - r*3.2), 1.0); }`);
+
+// ---------- Mandelbulb (raymarched into a half-res buffer) ----------
+const BW = 960, BH = 540;
+const bulbT = tex(BW, BH, 'f16', null, gl.LINEAR);
+const bulbF = fbo([bulbT]);
+const bulb = prog(quadVS, `
+in vec2 uv; out vec4 o;
+uniform float time, zoom; uniform vec2 res; uniform float power;
+float de(vec3 p, out vec4 trap){
+  vec3 z = p; float dr = 1.0, r = 0.0; trap = vec4(abs(z), dot(z,z));
+  for (int i = 0; i < 9; i++){
+    r = length(z); if (r > 2.0) break;
+    float th = acos(clamp(z.z/r,-1.0,1.0)) * power, ph = atan(z.y, z.x) * power;
+    dr = pow(r, power-1.0) * power * dr + 1.0;
+    z = pow(r, power) * vec3(sin(th)*cos(ph), sin(th)*sin(ph), cos(th)) + p;
+    trap = min(trap, vec4(abs(z), dot(z,z)));
+  }
+  return 0.5 * log(r) * r / dr;
+}
+float de(vec3 p){ vec4 t; return de(p, t); }
+vec3 nrm(vec3 p, float e){ vec2 k = vec2(1,-1)*e; return normalize(k.xyy*de(p+k.xyy) + k.yyx*de(p+k.yyx) + k.yxy*de(p+k.yxy) + k.xxx*de(p+k.xxx)); }
+void main(){
+  vec2 q = (uv*res - 0.5*res) / res.y;
+  float a = time*0.22 + 0.6, el = 0.35 + 0.15*sin(time*0.3);
+  float dist = mix(3.2, 1.55, zoom);
+  vec3 ro = dist * vec3(cos(a)*cos(el), sin(el), sin(a)*cos(el));
+  vec3 ta = vec3(0.0, 0.05, 0.0);
+  vec3 f = normalize(ta-ro), r = normalize(cross(f, vec3(0,1,0))), u = cross(r, f);
+  vec3 rd = normalize(f*1.6 + q.x*r + q.y*u);
+  float t = 0.0, glow = 0.0, hit = -1.0; vec4 trap; int steps = 0;
+  // bounding sphere
+  float bb = dot(ro,rd); float disc = bb*bb - dot(ro,ro) + 1.35*1.35;
+  if (disc > 0.0) {
+    t = max(0.0, -bb - sqrt(disc));
+    float tmax = -bb + sqrt(disc);
+    for (int i = 0; i < 140; i++){
+      float d = de(ro + rd*t, trap);
+      glow += exp(-d*28.0) * 0.012;
+      if (d < 0.0008*t) { hit = t; steps = i; break; }
+      t += d * 0.9; if (t > tmax) break;
+    }
+  }
+  vec3 bg = vec3(0.012, 0.010, 0.016) + vec3(0.9,0.45,0.25) * 0.05 * exp(-3.0*length(q));
+  vec3 col = bg;
+  if (hit > 0.0) {
+    vec3 p = ro + rd*hit;
+    vec3 n = nrm(p, 0.0006*hit);
+    vec3 l1 = normalize(vec3(0.6, 0.8, -0.4)), l2 = normalize(vec3(-0.7, -0.2, 0.6));
+    float ao = clamp(1.0 - float(steps)/90.0, 0.0, 1.0); ao = ao*ao;
+    float tr = clamp(trap.w, 0.0, 1.0);
+    vec3 base = mix(vec3(0.95, 0.42, 0.22), vec3(1.0, 0.85, 0.62), tr);
+    base = mix(base, vec3(0.30, 0.45, 0.95), clamp(trap.y*trap.y*1.8, 0.0, 1.0) * 0.6);
+    float d1 = max(dot(n,l1),0.0), d2 = max(dot(n,l2),0.0);
+    // soft shadow toward key light
+    float sh = 1.0, st = 0.01;
+    for (int i = 0; i < 24; i++){ float h = de(p + l1*st); sh = min(sh, 10.0*h/st); st += clamp(h, 0.01, 0.1); if (sh < 0.02) break; }
+    sh = clamp(sh, 0.0, 1.0);
+    vec3 h = normalize(l1 - rd);
+    float spec = pow(max(dot(n,h),0.0), 40.0) * sh;
+    float rim = pow(1.0 - max(dot(n,-rd),0.0), 3.0);
+    col = base * (d1*sh*1.6*vec3(1.0,0.92,0.82) + d2*0.35*vec3(0.4,0.55,1.0) + 0.12) * ao + spec*0.9 + rim*vec3(1.0,0.6,0.4)*0.5*ao;
+    col = mix(col, bg, 1.0 - exp(-0.05*hit*hit));
+  }
+  col += vec3(1.0, 0.55, 0.3) * glow;
+  o = vec4(col, 1.0);
+}`);
+
+// ---------- bloom + composite ----------
+const QW = 480, QH = 270;
+const blA = tex(QW, QH, 'f16', null, gl.LINEAR), blB = tex(QW, QH, 'f16', null, gl.LINEAR);
+const blAF = fbo([blA]), blBF = fbo([blB]);
+const down = prog(quadVS, `in vec2 uv; out vec4 o; uniform sampler2D a, b; uniform float mb, mp; uniform vec2 px;
+void main(){ vec3 c = vec3(0); for (int i=-1;i<=1;i++) for (int j=-1;j<=1;j++){ vec2 u = uv + vec2(i,j)*px; c += texture(a,u).rgb*mp + texture(b,u).rgb*mb; }
+ c /= 9.0; o = vec4(max(c - 0.35, 0.0), 1.0); }`);
+const blur = prog(quadVS, `in vec2 uv; out vec4 o; uniform sampler2D a; uniform vec2 dir;
+void main(){ const float w[5] = float[](0.227,0.195,0.122,0.054,0.016); vec3 c = texture(a,uv).rgb*w[0];
+ for (int i=1;i<5;i++){ c += texture(a,uv+dir*float(i)).rgb*w[i]; c += texture(a,uv-dir*float(i)).rgb*w[i]; } o = vec4(c,1.0); }`);
+const comp = prog(quadVS, `in vec2 uv; out vec4 o; uniform sampler2D parts, bulb, bloom; uniform float mp, mb, flash, fade, time;
+float h(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233)) + time) * 43758.5453); }
+void main(){
+  vec3 c = texture(parts, uv).rgb * mp + texture(bulb, uv).rgb * mb + texture(bloom, uv).rgb * 1.25;
+  c = 1.0 - exp(-c * 1.15);                      // filmic-ish tone map
+  c = pow(c, vec3(0.92));
+  vec2 d = uv - 0.5; c *= 1.0 - dot(d,d)*0.9;    // vignette
+  c += (h(uv*1000.0) - 0.5) * 0.018;             // grain
+  c = mix(c, vec3(1.0, 0.93, 0.85), flash);
+  o = vec4(c * fade, 1.0);
+}`);
+
+// ---------- camera ----------
+function mat4Mul(a, b) { const o = new Float32Array(16); for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + j] * b[i * 4 + k]; o[i * 4 + j] = s; } return o; }
+function persp(fov, asp, n, f) { const t = 1 / Math.tan(fov / 2); return new Float32Array([t / asp, 0, 0, 0, 0, t, 0, 0, 0, 0, (f + n) / (n - f), -1, 0, 0, 2 * f * n / (n - f), 0]); }
+function lookAt(e, c, up) {
+  const z = norm(sub(e, c)), x = norm(cross(up, z)), y = cross(z, x);
+  return new Float32Array([x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, -dot(x, e), -dot(y, e), -dot(z, e), 1]);
+}
+const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const norm = a => { const l = Math.hypot(...a); return [a[0] / l, a[1] / l, a[2] / l]; };
+
+function camera(t) {
+  // disk from above-ish -> front-on to read the text -> slow orbit around the attractor
+  const front = smooth(2.0, 7.0, t);
+  const orbit = smooth(T.toAttr + 0.5, T.toBulb, t);
+  const ang = -0.9 * (1 - front) + orbit * (t - T.toAttr) * 0.32;
+  const elev = 1.1 * (1 - front) + 0.35 * orbit;
+  const dist = 11.0 * (1 - front) + 6.6 * front + 1.4 * orbit + 0.25 * Math.sin(t * 0.5);
+  const eye = [Math.sin(ang) * Math.cos(elev) * dist, Math.sin(elev) * dist, Math.cos(ang) * Math.cos(elev) * dist];
+  const center = [0, 0.1 * orbit, 0];
+  return mat4Mul(persp(0.62, W / H, 0.05, 100), lookAt(eye, center, [0, 1, 0]));
+}
+
+// ---------- DOM layers ----------
+const $ = id => document.getElementById(id);
+const prompt = 'Create the most impressive demo of your capabilities.';
+function setDOM(t) {
+  const n = Math.floor(clamp((t - 0.5) / 2.3, 0, 1) * prompt.length);
+  const blink = Math.floor(t * 2.2) % 2 === 0 || (t > 0.5 && t < 2.8);
+  $('termtext').innerHTML = '<span class="p">&gt;</span> ' + prompt.slice(0, n) + (blink ? '<span class="c"></span>' : '<span class="c" style="opacity:0"></span>');
+  $('term').style.opacity = 1 - smooth(3.3, 3.9, t);
+  $('cap1').style.opacity = win(t, 6.8, 10.6, 0.5);
+  $('cap2').style.opacity = win(t, 12.2, 16.9, 0.5);
+  $('cap3').style.opacity = win(t, 18.8, 24.6, 0.5);
+  $('end').style.opacity = smooth(T.endIn, T.endIn + 0.8, t);
+  $('r1').style.opacity = smooth(26.0, 26.6, t);
+  $('r2').style.opacity = smooth(27.0, 27.6, t);
+  $('r3').style.opacity = smooth(28.0, 28.6, t);
+  $('sig').style.opacity = smooth(29.2, 30.0, t);
+  const hudOn = win(t, 4.6, T.endIn, 0.6);
+  $('hud').style.opacity = hudOn;
+  const mode = t < T.toAttr ? 'particles' : t < T.toBulb ? 'attractor' : 'raymarch';
+  $('hud').textContent = `t=${t.toFixed(2)}s  frame ${String(Math.round(t * FPS)).padStart(3, '0')}  ${mode}`;
+}
+
+// ---------- frame ----------
+let simTime = 0;
+const SUB = 4;
+function simAdvance(i) {
+  const t = i / FPS;
+  const dt = 1 / FPS / SUB;
+  // advance the simulation up to t
+  while (simTime < t - 1e-6) {
+    const st = simTime;
+    const wText = smooth(T.textIn, T.textIn + 2.2, st);
+    const wAttr = st < T.toAttr ? 0 : smooth(T.toAttr, T.toAttr + 3.2, st);
+    const wSwirl = st < T.toAttr ? 1 - smooth(T.textIn, T.textIn + 2.0, st) * 0.6 : 0.0;
+    simStep(st, dt, wText, wAttr, wSwirl);
+    simTime += dt;
+  }
+}
+function renderFrame(i) {
+  simAdvance(i);
+  const t = i / FPS;
+
+  const mp = t < T.termEnd ? smooth(0.2, 3.6, t) * 0.55 + smooth(3.4, 4.4, t) * 0.45 : 1 - smooth(T.toBulb - 0.3, T.toBulb + 0.6, t);
+  const mb = smooth(T.toBulb - 0.1, T.toBulb + 1.5, t) * (1 - smooth(T.endIn - 0.2, T.endIn + 1.0, t) * 0.8);
+
+  // particles -> HDR
+  gl.bindFramebuffer(gl.FRAMEBUFFER, hdrF);
+  gl.viewport(0, 0, hdrW, hdrH);
+  gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+  if (mp > 0.001) {
+    gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
+    gl.useProgram(draw.p);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, posT[ping]);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, velT[ping]);
+    gl.uniform1i(draw.u.pos, 0); gl.uniform1i(draw.u.vel, 1);
+    gl.uniformMatrix4fv(draw.u.mvp, false, camera(t));
+    gl.uniform1f(draw.u.pscale, 9.0);
+    gl.uniform1f(draw.u.alpha, 0.3 + 0.12 * win(t, T.textIn + 1.0, T.toAttr + 1.5, 1.5));
+    gl.uniform1f(draw.u.hueShift, smooth(T.toAttr, T.toAttr + 3, t));
+    gl.bindVertexArray(vao);
+    gl.drawArrays(gl.POINTS, 0, N);
+    gl.disable(gl.BLEND);
+  }
+
+  // fractal
+  if (mb > 0.001) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, bulbF);
+    gl.viewport(0, 0, BW, BH);
+    gl.useProgram(bulb.p);
+    const bt = t - T.toBulb;
+    gl.uniform1f(bulb.u.time, bt);
+    gl.uniform1f(bulb.u.zoom, smooth(0, 8.5, bt));
+    gl.uniform1f(bulb.u.power, 8.0);
+    gl.uniform2f(bulb.u.res, BW, BH);
+    quad();
+  }
+
+  // bloom
+  gl.bindFramebuffer(gl.FRAMEBUFFER, blAF); gl.viewport(0, 0, QW, QH);
+  gl.useProgram(down.p);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, hdrT);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, bulbT);
+  gl.uniform1i(down.u.a, 0); gl.uniform1i(down.u.b, 1);
+  gl.uniform1f(down.u.mp, mp); gl.uniform1f(down.u.mb, mb);
+  gl.uniform2f(down.u.px, 1 / QW, 1 / QH);
+  quad();
+  gl.useProgram(blur.p);
+  for (let k = 0; k < 2; k++) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, blBF); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, blA);
+    gl.uniform1i(blur.u.a, 0); gl.uniform2f(blur.u.dir, (1 + k) / QW, 0); quad();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, blAF); gl.bindTexture(gl.TEXTURE_2D, blB);
+    gl.uniform2f(blur.u.dir, 0, (1 + k) / QH); quad();
+  }
+
+  // composite
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, W, H);
+  gl.useProgram(comp.p);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, hdrT);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, bulbT);
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, blA);
+  gl.uniform1i(comp.u.parts, 0); gl.uniform1i(comp.u.bulb, 1); gl.uniform1i(comp.u.bloom, 2);
+  gl.uniform1f(comp.u.mp, mp); gl.uniform1f(comp.u.mb, mb);
+  const flash = Math.max(0, 1 - Math.abs(t - T.toBulb) / 0.35) * 0.9;
+  gl.uniform1f(comp.u.flash, flash);
+  gl.uniform1f(comp.u.fade, 1 - smooth(T.total - 1.0, T.total, t) );
+  gl.uniform1f(comp.u.time, i * 0.61);
+  quad();
+
+  setDOM(t);
+  gl.finish();
+  return t;
+}
+window.renderFrame = renderFrame;
+window.advance = i => { simAdvance(i); gl.finish(); };
+window.DURATION = DURATION;
+window.FPS = FPS;
+
+// live playback when opened directly (skips frames as needed, stays in sync with the clock)
+if (!location.search.includes('offline')) {
+  const fit = () => { const s = Math.min(innerWidth / W, innerHeight / H); $('stage').style.transform = `scale(${s})`; };
+  addEventListener('resize', fit); fit();
+  const t0 = performance.now();
+  const loop = () => {
+    const f = Math.floor((performance.now() - t0) / 1000 * FPS);
+    if (f <= DURATION * FPS) { renderFrame(f); requestAnimationFrame(loop); }
+  };
+  requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
