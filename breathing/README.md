@@ -9,7 +9,7 @@ Five particle animations for a breathing app. Each one is a strange attractor th
 | Breathe out | 8–12 s | The form settles back in, centre first. The flow speeds up again. |
 | Hold | 12–16 s | The form stays small and dim. The flow drifts. |
 
-Each video is exactly one 16 s cycle and loops with no seam: frame 480 is pixel-identical to frame 0. Set the player to loop.
+The videos are in `videos/`. Each video is exactly one 16 s cycle and loops with no seam: frame 480 is pixel-identical to frame 0. Set the player to loop.
 
 | File | Attractor | Palette |
 |---|---|---|
@@ -21,7 +21,9 @@ Each video is exactly one 16 s cycle and loops with no seam: frame 480 is pixel-
 
 `tide-labels.mp4` shows the same Tide loop with the "Breathe in / Hold / Breathe out / Hold" labels and a count. It is a preview of how app text could sit on top. The other videos have no text, so the app can draw its own.
 
-All videos are 1080×1080 at 30 fps, H.264, with no audio.
+`preview-grid.mp4` plays all six in sync, so you can compare them.
+
+All loops are 1080×1080 at 30 fps, H.264 at 5 Mbps (about 10 MB each), with no audio.
 
 ## How it works
 
