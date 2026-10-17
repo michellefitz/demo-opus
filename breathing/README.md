@@ -2,12 +2,16 @@
 
 Five particle animations for a breathing app. Each one is a strange attractor that billows to a box-breathing pattern.
 
+Tide and Lavender use the **bloom** motion:
+
 | Phase | Time | What the flow does |
 |---|---|---|
-| Breathe in | 0–4 s | The form swells outward. The centre moves first and the edge follows, so it billows. The flow speeds up and the halo fills. |
-| Hold | 4–8 s | The form stays full. The flow slows to a drift. |
-| Breathe out | 8–12 s | The form settles back in, centre first. The flow speeds up again. |
-| Hold | 12–16 s | The form stays small and dim. The flow drifts. |
+| Breathe in | 0–4 s | A small, tightly wound seed unwinds and opens to its full size. The centre leads and the outer arms follow. |
+| Hold | 4–8 s | The form stays fully open. The flow drifts and the form turns slowly. |
+| Breathe out | 8–12 s | The form twists, curls its edges inward and closes. Tide wrings about a horizontal axis. Lavender winds into a pinwheel. |
+| Hold | 12–16 s | The form is a small seed that keeps turning. |
+
+The rotation keeps going one way through the whole cycle, so the form never rewinds. Dawn, Moon and Rose still use the first **swell** motion (`?motion=swell`), where the form only grows and shrinks.
 
 The videos are in `videos/`. Each video is exactly one 16 s cycle and loops with no seam: frame 480 is pixel-identical to frame 0. Set the player to loop.
 
@@ -21,7 +25,7 @@ The videos are in `videos/`. Each video is exactly one 16 s cycle and loops with
 
 `tide-labels.mp4` shows the same Tide loop with the "Breathe in / Hold / Breathe out / Hold" labels and a count. It is a preview of how app text could sit on top. The other videos have no text, so the app can draw its own.
 
-`preview-grid.mp4` plays all six in sync, so you can compare them.
+`bloom-preview.mp4` plays the two bloom loops side by side. `preview-grid.mp4` plays the first versions of all five, plus the labelled Tide, in sync.
 
 All loops are 1080×1080 at 30 fps, H.264 at 5 Mbps (about 10 MB each), with no audio.
 
